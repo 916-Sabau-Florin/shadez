@@ -4,19 +4,14 @@ enum Either<L,R> {
     Right(R)
 }
 
-pub struct ComputeShader<'s> {
+pub struct ComputeShader {
     device: wgpu::Device,
     queue: wgpu::Queue,
     cs_module: wgpu::ShaderModule,
-
-    
-    buffer_data: Vec<Either<&'s [u8], &'s mut [u8]>>,
-    buffers: Vec<wgpu::Buffer>,
-    
-
 }
 
-impl<'s> ComputeShader<'s> {
+
+impl ComputeShader {
     pub fn from_source<'a>(source: &'a str) -> Self {
         
         let adapter = smol::future::block_on(wgpu::Adapter::request(
@@ -51,32 +46,57 @@ impl<'s> ComputeShader<'s> {
             device,
             queue,
             cs_module,
-            buffer_data: Vec::new(),
-            buffers: Vec::new(),
         } 
     }
 
-    pub fn bind_buffer(&mut self, buffer: &'s [u8]) {
-        
-        self.buffers.push(self.device.create_buffer_with_data(
+    pub fn start(&self) -> ComputePass {
+        ComputePass {
+            shader: &self,
+            buffer_data: Vec::new(),
+            buffers: Vec::new(),
+        }
+    }
+
+}
+
+pub struct ComputePass<'s,'b> {
+    shader: &'s ComputeShader,
+
+    buffer_data: Vec<Either<&'b [u8], &'b mut [u8]>>,
+    buffers: Vec<wgpu::Buffer>,
+
+}
+
+
+impl<'s, 'b> ComputePass<'s, 'b> {
+
+    pub fn bind_buffer<B: bytemuck::Pod>(mut self, buffer: &'b [B]) -> Self {
+
+        let buffer = bytemuck::cast_slice(buffer); 
+
+        self.buffers.push(self.shader.device.create_buffer_with_data(
                 buffer,
                 wgpu::BufferUsage::STORAGE_READ
         ));
 
         self.buffer_data.push(Either::Left(buffer));
+        self
     }
 
-    pub fn bind_mut_buffer(&mut self, buffer: &'s mut [u8]) {
+    pub fn bind_mut_buffer<B: bytemuck::Pod>(mut self, buffer: &'b mut [B]) -> Self { 
+        
+        let buffer = bytemuck::cast_slice_mut(buffer);
 
-        self.buffers.push(self.device.create_buffer_with_data(
+        self.buffers.push(self.shader.device.create_buffer_with_data(
                 buffer,
                 wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::MAP_READ
         ));
 
         self.buffer_data.push(Either::Right(buffer));
+        self
     }
 
-    pub async fn compute_async(&mut self, x: u32, y: u32, z: u32) {
+    pub async fn compute_async(mut self, x: u32, y: u32, z: u32) {
 
         let mut bind_group_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
         let mut bindings: Vec<wgpu::Binding> = Vec::new();
@@ -105,8 +125,7 @@ impl<'s> ComputeShader<'s> {
                     bind_group_entries.push(wgpu::BindGroupLayoutEntry {
                         binding: idx as u32,
                         visibility: wgpu::ShaderStage::COMPUTE,
-                        ty: wgpu::BindingType::StorageBuffer {
-                            dynamic: false,
+                        ty: wgpu::BindingType::StorageBuffer { dynamic: false,
                             readonly: false,
                         }
                     });
@@ -121,30 +140,30 @@ impl<'s> ComputeShader<'s> {
             }
         }
         
-        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bind_group_layout = self.shader.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             bindings: &bind_group_entries,
             label: Some("uniform_bind_group_layout"),
         });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = self.shader.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             bindings: &bindings,
             label: Some("bind_group"),
         });
 
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = self.shader.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             bind_group_layouts: &[&bind_group_layout]
         });
 
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = self.shader.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             layout: &pipeline_layout,
             compute_stage: wgpu::ProgrammableStageDescriptor {
-                module: &self.cs_module,
+                module: &self.shader.cs_module,
                 entry_point:"main",
             }
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut encoder = self.shader.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("command_encoder")
         });
 
@@ -156,19 +175,18 @@ impl<'s> ComputeShader<'s> {
             pass.dispatch(x,y,z);
         }
 
-        self.queue.submit(&[encoder.finish()]);
-
-
+        self.shader.queue.submit(&[encoder.finish()]);
+        
+ 
         for (idx, either_buffer) in self.buffer_data.iter_mut().enumerate() {
             match either_buffer {
                 Either::Left(_buffer) => {},
                 Either::Right(buffer) => {
                     let future = self.buffers[idx].map_read(0, 
                             std::mem::size_of_val(*buffer) as u64);
-                    self.device.poll(wgpu::Maintain::Wait);
+                    self.shader.device.poll(wgpu::Maintain::Wait);
 
                     let data = future.await.unwrap();
-                    println!("{:#?}", data.as_slice());
 
                     (*buffer).copy_from_slice(data.as_slice()); 
 
@@ -179,8 +197,9 @@ impl<'s> ComputeShader<'s> {
         } 
     }
 
-    pub fn compute(&mut self, x: u32, y: u32, z: u32) {
+    pub fn compute(self, x: u32, y: u32, z: u32) {
         smol::run(self.compute_async(x,y,z)); 
     }
-}
 
+
+}
