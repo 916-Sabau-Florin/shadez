@@ -1,3 +1,5 @@
+pub use bytemuck::Pod;
+
 
 enum Either<L,R> {
     Left(L),
@@ -49,7 +51,36 @@ impl ComputeShader {
         } 
     }
 
-    pub fn start(&self) -> ComputePass {
+    pub fn from_spirv<'a>(bytes: &'a [u8]) -> Self {
+
+        let adapter = smol::future::block_on(wgpu::Adapter::request(
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::Default,
+                    compatible_surface: None,
+                },
+                wgpu::BackendBit::PRIMARY
+        )).unwrap();
+
+        let (device, queue) = smol::future::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                extensions: wgpu::Extensions::default(),
+                limits: wgpu::Limits::default(),
+            }
+        ));
+
+
+        let data = wgpu::read_spirv(std::io::Cursor::new(bytes)).unwrap();
+
+        let cs_module = device.create_shader_module(&data);
+    
+        Self {
+            device,
+            queue,
+            cs_module,
+        } 
+    }
+
+    pub fn pass(&self) -> ComputePass {
         ComputePass {
             shader: &self,
             buffer_data: Vec::new(),
@@ -200,6 +231,5 @@ impl<'s, 'b> ComputePass<'s, 'b> {
     pub fn compute(self, x: u32, y: u32, z: u32) {
         smol::run(self.compute_async(x,y,z)); 
     }
-
 
 }
